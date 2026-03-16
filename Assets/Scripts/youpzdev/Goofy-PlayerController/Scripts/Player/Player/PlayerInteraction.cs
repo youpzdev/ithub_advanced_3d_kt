@@ -1,68 +1,88 @@
-// PlayerInteraction.cs
+using System.Collections;
+using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
-using TMPro;
 
 public class PlayerInteraction : MonoBehaviour
 {
+    public static PlayerInteraction Instance { get; private set; }
+
     [Header("Settings")]
-    [SerializeField] private float interactRange = 3f;
-    [SerializeField] private LayerMask interactLayer;
     [SerializeField] private Camera playerCamera;
-    [SerializeField] private float interactCooldown = 0.5f; // КД после взаимодействия
+    [SerializeField] private LayerMask interactableLayer;
+    [SerializeField] private LayerMask obstacleLayer;
+    [SerializeField] private float interactionDistance = 2.5f;
+    [SerializeField] private float interactCooldown = 0.5f;
 
     [Header("UI")]
-    [SerializeField] private GameObject promptPanel;
-    [SerializeField] private TextMeshProUGUI promptText;
-    [SerializeField] private GameObject holdProgressPanel;
+    [SerializeField] private CanvasGroup interactableCanvasGroup;
+    [SerializeField] private float fadeDuration = 0.3f;
+    [SerializeField] private TMP_Text itemNameText;
+    [SerializeField] private TMP_Text interactionText;
     [SerializeField] private Image holdProgressBar;
+    [SerializeField] private Image BackgroundProgressBar;
 
     private IInteractable currentInteractable;
-    private float holdTimer = 0f;
-    private bool isHolding = false;
-    private float cooldownTimer = 0f; // текущий КД
+    private IDraggable currentDraggable;
+    private float holdTimer;
+    private bool isHolding;
+    private float cooldownTimer;
+    private bool uiVisible;
+    private Coroutine fadeCoroutine;
 
     private bool IsOnCooldown => cooldownTimer > 0f;
 
+    void Awake()
+    {
+        if (Instance != null) { Destroy(gameObject); return; }
+        Instance = this;
+        SetUIActive(false);
+        interactableCanvasGroup.alpha = 0;
+    }
+
     void Update()
     {
-        // Тикаем КД независимо от всего
-        if (IsOnCooldown)
-            cooldownTimer -= Time.deltaTime;
-
+        if (IsOnCooldown) cooldownTimer -= Time.deltaTime;
         DetectInteractable();
         HandleInput();
         UpdateHoldUI();
     }
 
-    void DetectInteractable()
+    private void DetectInteractable()
     {
-        Ray ray = playerCamera.ScreenPointToRay(new Vector3(Screen.width / 2f, Screen.height / 2f));
+        if (PlayerPickUpDrop.Instance.IsGrabbing)
+        {
+            if (currentInteractable != null) ResetCurrent();
+            return;
+        }
 
-        if (Physics.Raycast(ray, out RaycastHit hit, interactRange, interactLayer))
+        Ray ray = playerCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0));
+        bool found = false;
+
+        if (Physics.Raycast(ray, out RaycastHit hit, interactionDistance, interactableLayer) && IsVisible(hit))
         {
             IInteractable interactable = hit.collider.GetComponentInParent<IInteractable>();
-
             if (interactable != null)
             {
-                currentInteractable = interactable;
-                ShowPrompt(interactable);
-                return;
+                found = true;
+                if (interactable != currentInteractable)
+                {
+                    ResetCurrent();
+                    currentInteractable = interactable;
+                    currentDraggable = hit.collider.GetComponentInParent<IDraggable>();
+                    currentDraggable?.ShowOutline(true);
+                    ShowPrompt(currentInteractable);
+                }
             }
         }
 
-        currentInteractable = null;
-        HidePrompt();
-        ResetHold();
+        if (!found && currentInteractable != null) ResetCurrent();
+        if (found != uiVisible) { uiVisible = found; FadeUI(uiVisible); }
     }
 
-    void HandleInput()
+    private void HandleInput()
     {
-        if (currentInteractable == null || IsOnCooldown)
-        {
-            ResetHold();
-            return;
-        }
+        if (currentInteractable == null || IsOnCooldown) return;
 
         if (currentInteractable.RequiresHold)
         {
@@ -70,7 +90,6 @@ public class PlayerInteraction : MonoBehaviour
             {
                 isHolding = true;
                 holdTimer += Time.deltaTime;
-
                 if (holdTimer >= currentInteractable.HoldDuration)
                 {
                     currentInteractable.OnHoldInteract();
@@ -83,64 +102,89 @@ public class PlayerInteraction : MonoBehaviour
                 ResetHold();
             }
         }
-        else
+        else if (InputManager.Instance.Interact)
         {
-            if (InputManager.Instance.Interact)
-            {
-                currentInteractable.OnInteract();
-                InputManager.Instance.ConsumeInteract();
-                StartCooldown();
-            }
+            currentInteractable.OnInteract();
+            InputManager.Instance.ConsumeInteract();
+            StartCooldown();
+            ResetCurrent();
         }
     }
 
-    void UpdateHoldUI()
+    private void UpdateHoldUI()
     {
-        if (holdProgressPanel == null) return;
-
-        bool showHoldUI = isHolding && currentInteractable != null
-                          && currentInteractable.RequiresHold && !IsOnCooldown;
-
-        holdProgressPanel.SetActive(showHoldUI);
-
-        if (showHoldUI && holdProgressBar != null)
-            holdProgressBar.fillAmount = holdTimer / currentInteractable.HoldDuration;
+        if (holdProgressBar == null) return;
+        bool show = isHolding && currentInteractable != null && currentInteractable.RequiresHold && !IsOnCooldown;
+        holdProgressBar.gameObject.SetActive(show);
+        BackgroundProgressBar.gameObject.SetActive(show);
+        if (show) holdProgressBar.fillAmount = holdTimer / currentInteractable.HoldDuration;
     }
 
-    void ShowPrompt(IInteractable interactable)
+    private void ShowPrompt(IInteractable interactable)
     {
-        if (promptPanel != null) promptPanel.SetActive(true);
-
-        if (promptText != null)
-        {
-            // Во время КД показываем отдельный текст
-            if (IsOnCooldown)
-            {
-                promptText.text = $"...({cooldownTimer:F1}с)";
-                return;
-            }
-
-            string hint = interactable.RequiresHold
-                ? $"[Зажмите E]\n{interactable.GetPromptText()}\n({interactable.HoldDuration}с)"
-                : $"[E] {interactable.GetPromptText()}";
-
-            promptText.text = hint;
-        }
+        if (itemNameText != null) itemNameText.text = interactable.GetPromptText();
+        if (interactionText != null) interactionText.text = interactable.RequiresHold
+            ? $"[Держать E] {interactable.GetPromptText()} ({interactable.HoldDuration}с)"
+            : $"[E] {interactable.GetPromptText()}";
     }
 
-    void HidePrompt()
+    private void ResetCurrent()
     {
-        if (promptPanel != null) promptPanel.SetActive(false);
+        currentDraggable?.ShowOutline(false);
+        currentDraggable = null;
+        currentInteractable = null;
+        ResetHold();
+        SetUIActive(false);
     }
 
-    void ResetHold()
+    private void ResetHold()
     {
         holdTimer = 0f;
         isHolding = false;
     }
 
-    void StartCooldown()
+    private void StartCooldown() => cooldownTimer = interactCooldown;
+
+    private bool IsVisible(RaycastHit hit)
     {
-        cooldownTimer = interactCooldown;
+        Vector3 dir = (hit.point - playerCamera.transform.position).normalized;
+        float dist = Vector3.Distance(playerCamera.transform.position, hit.point);
+        return !Physics.Raycast(playerCamera.transform.position, dir, dist, obstacleLayer);
+    }
+
+    private void SetUIActive(bool active)
+    {
+        if (itemNameText != null) itemNameText.gameObject.SetActive(active);
+        if (interactionText != null) interactionText.gameObject.SetActive(active);
+    }
+
+    private void FadeUI(bool fadeIn)
+    {
+        if (fadeCoroutine != null) StopCoroutine(fadeCoroutine);
+        fadeCoroutine = StartCoroutine(FadeCoroutine(fadeIn));
+    }
+
+    private IEnumerator FadeCoroutine(bool fadeIn)
+    {
+        float target = fadeIn ? 1f : 0f;
+        float start = interactableCanvasGroup.alpha;
+        float t = 0f;
+        if (fadeIn) SetUIActive(true);
+        while (t < fadeDuration)
+        {
+            t += Time.deltaTime;
+            interactableCanvasGroup.alpha = Mathf.Lerp(start, target, Mathf.SmoothStep(0f, 1f, t / fadeDuration));
+            yield return null;
+        }
+        interactableCanvasGroup.alpha = target;
+        if (!fadeIn) SetUIActive(false);
+        fadeCoroutine = null;
+    }
+
+    public void ForceHide()
+    {
+        ResetCurrent();
+        FadeUI(false);
+        uiVisible = false;
     }
 }

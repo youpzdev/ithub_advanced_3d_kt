@@ -1,11 +1,19 @@
-// InteractableObject.cs
 using UnityEngine;
 
 public interface IInteractable
 {
-    string GetPromptText();      // Текст подсказки как бы
-    void OnInteract();           // Быстрое взаимодействие (нажать E)
-    bool RequiresHold { get; }   // Нужно ли зажимать E?
-    float HoldDuration { get; }  // Сколько секунд зажимать
-    void OnHoldInteract();       // Взаимодействие по зажатию
+    
+    string GetPromptText();
+    void OnInteract();
+    bool RequiresHold { get; }
+    float HoldDuration { get; }
+    void OnHoldInteract();
+}
+
+public interface IDraggable
+{
+    void Grab(Transform grabPoint);
+    void Drop();
+    void Throw(Camera cam, float forceMultiplier);
+    void ShowOutline(bool show);
 }
